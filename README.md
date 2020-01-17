@@ -179,9 +179,7 @@ Open the Traefik Dashboard and select the different backends available
 - Before starting the stack, export these environment variables:
     - `export CLIENT_ID=<client-id>` (taken from gitlab.com)
     - `export CLIENT_SECRET=<client-secret>` (taken from gitlab.com)
-    - `export ENCRYPTION_KEY=<encryption-key>` (32 byte random string, e.g. `< /dev/urandom tr -dc A-Za-z0-9 | head -c32`)
-- Update environment on `traefik-forward-auth` in  `docker-traefik-compose.yml` (`CLIENT_ID` and `CLIENT_SECRET`,`SECRET` should be a random 32 bytes long string)
-- For grafana these updates need to happen in `grafana/config.monitoring`  
+    - `export ENCRYPTION_KEY=<encryption-key>` (32 byte random string, e.g. `< /dev/urandom tr -dc A-Za-z0-9 | head -c32`)  
 
 # Production Security:
 
