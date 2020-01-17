@@ -111,6 +111,17 @@ Now we need to create the Prometheus Datasource in order to connect Grafana to P
 
 <img src="https://raw.githubusercontent.com/vegasbrianc/prometheus/master/images/Add_Data_Source.png" width="400" heighth="400">
 
+## Monitoring dockerd
+- Edit or create `/etc/docker/daemon.json`:
+```
+{
+  "metrics-addr" : "0.0.0.0:9323",
+  "experimental" : true
+}
+```
+- restart docker: `sudo systemctl restart docker.service` 
+
+
 # Security Considerations
 This project is intended to be a quick-start to get up and running with Docker and Prometheus. Security has not been implemented in this project. It is the users responsability to implement Firewall/IpTables and SSL.
 
@@ -159,6 +170,18 @@ Password: foobar
 Open the Traefik Dashboard and select the different backends available
 
 **Note: Upper right-hand corner of Grafana switch the default 1 hour time range down to 5 minutes. Refresh a couple times and you should see data start flowing**
+
+# OpenID Connect with funkypenguin/traefik-forward-auth and Gitlab:
+ - Configure an application in Gitlab: Profile -> Settings -> Applications 
+ 
+![Gitlab](https://raw.githubusercontent.com/felixz92/prometheus/master/images/gitlab-auth.png)
+
+- Before starting the stack, export these environment variables:
+    - `export CLIENT_ID=<client-id>` (taken from gitlab.com)
+    - `export CLIENT_SECRET=<client-secret>` (taken from gitlab.com)
+    - `export ENCRYPTION_KEY=<encryption-key>` (32 byte random string, e.g. `< /dev/urandom tr -dc A-Za-z0-9 | head -c32`)
+- Update environment on `traefik-forward-auth` in  `docker-traefik-compose.yml` (`CLIENT_ID` and `CLIENT_SECRET`,`SECRET` should be a random 32 bytes long string)
+- For grafana these updates need to happen in `grafana/config.monitoring`  
 
 # Production Security:
 

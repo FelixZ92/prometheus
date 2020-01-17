@@ -1,0 +1,280 @@
+version: '3.7'
+
+volumes:
+  prometheus_data: {}
+  grafana_data: {}
+  traefik_acme_data: {}
+  jaeger_data: {}
+
+networks:
+  monitor-net:
+  traefik:
+
+services:
+  # The auth gate for SSO
+  # https://geek-cookbook.funkypenguin.co.nz/ha-docker-swarm/traefik-forward-auth/
+  traefik-forward-auth:
+    # thomseddeon's image doesnt support OIDC_ISSUER yet
+    #    image: thomseddon/traefik-forward-auth
+    image: funkypenguin/traefik-forward-auth
+    depends_on:
+      - traefik
+    networks:
+      - traefik
+    environment:
+      CLIENT_ID: ${CLIENT_ID}
+      CLIENT_SECRET: ${CLIENT_SECRET}
+      # This is based on using the Master realm. Create a new client, this will go into your CLIENT_ID, CLIENT_SECRET details.
+      OIDC_ISSUER: https://gitlab.com
+      SECRET: ${ENCRYPTION_KEY}
+      AUTH_HOST: https://gitlab.com
+      # https://github.com/thomseddon/traefik-forward-auth#user-restriction
+      #      WHITELIST: ${EMAIL}
+      LIFETIME: "2592000"
+
+  traefik:
+    image: traefik:v2.0
+    depends_on:
+      - jaeger
+    command:
+      - "--log.level=info"
+      - "--api=true"
+      - "--api.dashboard=true"
+      - "--api.insecure=true"
+      - "--entryPoints.web.address=:80"
+      - "--entryPoints.websecure.address=:443"
+      - "--certificatesResolvers.default.acme.httpChallenge=true"
+      - "--certificatesresolvers.default.acme.httpChallenge.entryPoint=web"
+      - "--certificatesresolvers.default.acme.email=REPLACE@ME.com"
+      - "--certificatesResolvers.default.acme.storage=acme.json"
+      - "--certificatesresolvers.default.acme.caserver=https://acme-staging-v02.api.letsencrypt.org/directory"
+      - "--metrics=true"
+      - "--metrics.prometheus=true"
+      - "--tracing=true"
+      - "--tracing.serviceName=traefik"
+      - "--tracing.jaeger=true"
+      - "--tracing.jaeger.samplingServerURL=http://jaeger:5778/sampling"
+      - "--tracing.jaeger.localAgentHostPort=jaeger:6831"
+      - "--tracing.jaeger.collector.endpoint=http://jaeger:14268/api/traces?format=jaeger.thrift"
+      - "--providers.docker.endpoint=unix:///var/run/docker.sock"
+      - "--providers.docker.exposedByDefault=false"
+    networks:
+      - traefik
+      - monitor-net
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - traefik_acme_data:/var/lib/traefik
+    ports:
+      - target: 80
+        published: 80
+        mode: host
+      - target: 443
+        published: 443
+        mode: host
+      - target: 8080
+        published: 8080
+        protocol: tcp
+        mode: host
+    restart: always
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.services.traefik-dashboard.loadbalancer.server.port=8080"
+      - "traefik.http.middlewares.gitlab-auth.forwardauth.address=http://traefik-forward-auth:4181"
+      - "traefik.http.middlewares.gitlab-auth.forwardauth.trustForwardHeader=true"
+      - "traefik.http.middlewares.gitlab-auth.forwardauth.authResponseHeaders=X-Forwarded-User"
+      - "traefik.http.middlewares.traefik-dashboard.redirectscheme.scheme=https"
+      - "traefik.http.routers.traefik-dashboard.rule=Host(`traefik-dashboard.localhost`)"
+      - "traefik.http.routers.traefik-dashboard.entrypoints=web"
+      - "traefik.http.routers.traefik-dashboard.middlewares=traefik-dashboard@docker"
+      - "traefik.http.routers.traefik-dashboard-secure.rule=Host(`traefik-dashboard.localhost`)"
+      - "traefik.http.routers.traefik-dashboard-secure.entrypoints=websecure"
+      - "traefik.http.routers.traefik-dashboard-secure.tls.certresolver=default"
+      - "traefik.http.routers.traefik-dashboard-secure.middlewares=gitlab-auth@docker"
+
+  prometheus:
+    image: prom/prometheus
+    volumes:
+      - ./prometheus/:/etc/prometheus/
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    networks:
+      - monitor-net
+    restart: on-failure
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.services.prometheus.loadbalancer.server.port=9090"
+      - "traefik.http.middlewares.prometheus.redirectscheme.scheme=https"
+      - "traefik.http.routers.prometheus.rule=Host(`prometheus.localhost`)"
+      - "traefik.http.routers.prometheus.entrypoints=web"
+      - "traefik.http.routers.prometheus.middlewares=prometheus@docker"
+      - "traefik.http.routers.prometheus-secure.rule=Host(`prometheus.localhost`)"
+      - "traefik.http.routers.prometheus-secure.entrypoints=websecure"
+      - "traefik.http.routers.prometheus-secure.tls.certresolver=default"
+      - "traefik.http.routers.prometheus-secure.middlewares=gitlab-auth@docker"
+
+  node-exporter:
+    image: prom/node-exporter
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - --collector.filesystem.ignored-mount-points
+      - "^/(sys|proc|dev|host|etc|rootfs/var/lib/docker/containers|rootfs/var/lib/docker/overlay2|rootfs/run/docker/netns|rootfs/var/lib/docker/aufs)($$|/)"
+    ports:
+      - 9100:9100
+    networks:
+      - monitor-net
+    restart: on-failure
+
+  alertmanager:
+    image: prom/alertmanager
+    ports:
+      - 9093
+    volumes:
+      - "./alertmanager/:/etc/alertmanager/"
+    networks:
+      - monitor-net
+    command:
+      - '--config.file=/etc/alertmanager/config.yml'
+      - '--storage.path=/alertmanager'
+    restart: on-failure
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.services.alertmanager.loadbalancer.server.port=9093"
+      - "traefik.http.middlewares.alertmanager.redirectscheme.scheme=https"
+      - "traefik.http.routers.alertmanager.rule=Host(`alertmanager.localhost`)"
+      - "traefik.http.routers.alertmanager.entrypoints=web"
+      - "traefik.http.routers.alertmanager.middlewares=alertmanager@docker"
+      - "traefik.http.routers.alertmanager-secure.rule=Host(`alertmanager.localhost`)"
+      - "traefik.http.routers.alertmanager-secure.entrypoints=websecure"
+      - "traefik.http.routers.alertmanager-secure.tls.certresolver=default"
+      - "traefik.http.routers.alertmanager-secure.middlewares=gitlab-auth@docker"
+
+  cadvisor:
+    image: google/cadvisor
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    ports:
+      - 8080
+    networks:
+      - monitor-net
+    restart: on-failure
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.services.cadvisor.loadbalancer.server.port=8080"
+      - "traefik.http.middlewares.cadvisor.redirectscheme.scheme=https"
+      - "traefik.http.routers.cadvisor.rule=Host(`cadvisor.localhost`)"
+      - "traefik.http.routers.cadvisor.entrypoints=web"
+      - "traefik.http.routers.cadvisor.middlewares=cadvisor@docker"
+      - "traefik.http.routers.cadvisor-secure.rule=Host(`cadvisor.localhost`)"
+      - "traefik.http.routers.cadvisor-secure.entrypoints=websecure"
+      - "traefik.http.routers.cadvisor-secure.tls.certresolver=default"
+      - "traefik.http.routers.cadvisor-secure.middlewares=gitlab-auth@docker"
+
+  grafana:
+    image: grafana/grafana
+    depends_on:
+      - prometheus
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning/:/etc/grafana/provisioning/
+    networks:
+      - monitor-net
+    user: "104"
+    environment:
+      GF_SERVER_ROOT_URL: https://grafana.localhost
+      GF_SECURITY_ADMIN_PASSWORD: foobar
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_GITLAB_ENABLED: "true"
+      GF_AUTH_GITLAB_ALLOW_SIGN_UP: "true"
+      GF_AUTH_GITLAB_CLIENT_ID: ${CLIENT_ID}
+      GF_AUTH_GITLAB_CLIENT_SECRET: ${CLIENT_SECRET}
+      GF_AUTH_GITLAB_SCOPES: api
+      GF_AUTH_GITLAB_AUTH_URL: https://gitlab.com/oauth/authorize
+      GF_AUTH_GITLAB_TOKEN_URL: https://gitlab.com/oauth/token
+      GF_AUTH_GITLAB_API_URL: https://gitlab.com/api/v4
+      GF_AUTH_GITLAB_ALLOWED_GROUPS: fzx-projects
+    restart: on-failure
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.services.grafana.loadbalancer.server.port=3000"
+      - "traefik.http.middlewares.grafana.redirectscheme.scheme=https"
+      - "traefik.http.routers.grafana.rule=Host(`grafana.localhost`)"
+      - "traefik.http.routers.grafana.entrypoints=web"
+      - "traefik.http.routers.grafana.middlewares=grafana@docker"
+      - "traefik.http.routers.grafana-secure.rule=Host(`grafana.localhost`)"
+      - "traefik.http.routers.grafana-secure.entrypoints=websecure"
+      - "traefik.http.routers.grafana-secure.tls.certresolver=default"
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.16
+    environment:
+      SPAN_STORAGE_TYPE: badger
+      BADGER_EPHEMERAL: "false"
+      BADGER_DIRECTORY_VALUE: /badger/data
+      BADGER_DIRECTORY_KEY: /badger/key
+    volumes:
+      - jaeger_data:/badger
+    ports:
+      - 5775
+      - 6831
+      - 6832
+      - 5778
+      - 16686
+      - 14268
+      - 9411
+    networks:
+      - monitor-net
+    restart: on-failure
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.services.jaeger.loadbalancer.server.port=16686"
+      - "traefik.http.middlewares.jaeger.redirectscheme.scheme=https"
+      - "traefik.http.routers.jaeger.rule=Host(`jaeger.localhost`)"
+      - "traefik.http.routers.jaeger.entrypoints=web"
+      - "traefik.http.routers.jaeger.middlewares=jaeger@docker"
+      - "traefik.http.routers.jaeger-secure.rule=Host(`jaeger.localhost`)"
+      - "traefik.http.routers.jaeger-secure.entrypoints=websecure"
+      - "traefik.http.routers.jaeger-secure.tls.certresolver=default"
+      - "traefik.http.routers.jaeger-secure.middlewares=gitlab-auth@docker"
+
+  docker-gc:
+    image: clockworksoul/docker-gc-cron:latest
+    configs:
+      - source: docker-garbage-collection
+        target: /etc/docker-gc-exclude
+    environment:
+      - CRON=25 11 * * *
+      # By default, docker will not remove an image if it is tagged in multiple repositories. If
+      # you have a server running docker where this is the case, for example in CI environments
+      # where dockers are being built, re-tagged, and pushed, you can set this flag to 1 to override.
+      - FORCE_IMAGE_REMOVAL=1
+      # By default, if an error is encountered when cleaning up a container, Docker will report the
+      # error back and leave it on disk. This can sometimes lead to containers accumulating. If
+      # you run into this issue, you can force the removal of the container by setting this flag.
+      - FORCE_CONTAINER_REMOVAL=1
+      # By default, docker-gc will not remove a container if it exited less than 1 hour ago.
+      # Set the GRACE_PERIOD_SECONDS variable to override this default.
+      - GRACE_PERIOD_SECONDS=3600
+      # By default, docker-gc will proceed with deletion of containers and images. To test your
+      # settings set the DRY_RUN variable to override this default
+      - DRY_RUN=0
+      # By default, this process will leave any dangling volumes untouched. To instruct the
+      # process to automatically clean up any dangling volumes, simply set this value to 1.
+      - CLEAN_UP_VOLUMES=0
+      # If you don't like all your log output and cron times being in UTC, you can set the
+      # TZ variable to override the default.
+      #- TZ=America/Chicago
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
